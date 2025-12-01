@@ -1,21 +1,28 @@
 {
+  "version": 2,
   "builds": [
     {
-      "src": "app.py",
+      "src": "api/index.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
+      "src": "/api/(.*)",
+      "dest": "api/index.py"
+    },
+    {
       "src": "/(.*)",
-      "dest": "app.py"
+      "dest": "api/index.py"
     }
   ],
   "env": {
-    "SUPABASE_URL": "@supabase_url",
-    "SUPABASE_KEY": "@supabase_key",
-    "MODEL_PATH": "/tmp/models",
-    "MODEL_URL": "@model_url"
+    "MODEL_PATH": "/tmp/models"
   },
-  "buildCommand": "pip install -r requirements.txt"
+  "functions": {
+    "api/index.py": {
+      "memory": 1024,
+      "maxDuration": 30
+    }
+  }
 }
