@@ -1,9 +1,10 @@
-from flask import Flask, request, jsonify, render_template_string, session
+from flask import Flask, request, jsonify, render_template_string
 import os
 import sys
 import tempfile
 from pathlib import Path
 from datetime import datetime
+import traceback
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -11,47 +12,58 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
 
-# Initialize Supabase
+# Global variables for lazy loading
 supabase_client = None
 supabase_queries = None
+pdf_extractor = None
+model_loader = None
 
-try:
-    from supabase import create_client, Client
-    supabase_url = os.getenv('SUPABASE_URL')
-    supabase_key = os.getenv('SUPABASE_KEY')
+def init_supabase():
+    """Lazy initialize Supabase"""
+    global supabase_client, supabase_queries
     
-    if supabase_url and supabase_key:
-        supabase_client: Client = create_client(supabase_url, supabase_key)
+    if supabase_client is not None:
+        return supabase_client
+    
+    try:
+        from supabase import create_client, Client
+        supabase_url = os.getenv('SUPABASE_URL')
+        supabase_key = os.getenv('SUPABASE_KEY')
         
-        # Import query helper
-        from utils.supabase_queries import SupabaseQueries
-        supabase_queries = SupabaseQueries(supabase_client)
-        print("✅ Supabase connected successfully")
-    else:
-        print("⚠️ Supabase credentials not found. Database features disabled.")
-except Exception as e:
-    print(f"⚠️ Supabase initialization error: {e}")
+        if supabase_url and supabase_key:
+            supabase_client = create_client(supabase_url, supabase_key)
+            from utils.supabase_queries import SupabaseQueries
+            supabase_queries = SupabaseQueries(supabase_client)
+            print("✅ Supabase initialized")
+        else:
+            print("⚠️ Supabase credentials not found")
+    except Exception as e:
+        print(f"⚠️ Supabase init error: {e}")
+    
+    return supabase_client
 
-# Auto-download model jika belum ada
-print("🔍 Checking for model...")
-try:
-    from api.download_model import download_model
-    download_model()
-except Exception as e:
-    print(f"⚠️ Error in auto-download: {e}")
+def init_extractors():
+    """Lazy initialize PDF extractor and model"""
+    global pdf_extractor, model_loader
+    
+    if pdf_extractor is not None:
+        return pdf_extractor, model_loader
+    
+    try:
+        from utils.pdf_extractor import PDFExtractor
+        from utils.model_loader import ModelLoader
+        
+        pdf_extractor = PDFExtractor()
+        model_loader = ModelLoader(os.getenv('MODEL_PATH', '/tmp/models'))
+        
+        print("✅ Extractors initialized")
+    except Exception as e:
+        print(f"⚠️ Extractor init error: {e}")
+        traceback.print_exc()
+    
+    return pdf_extractor, model_loader
 
-# Import utilities
-try:
-    from utils.pdf_extractor import PDFExtractor
-    from utils.model_loader import ModelLoader
-    pdf_extractor = PDFExtractor()
-    model_loader = ModelLoader(os.getenv('MODEL_PATH', '/tmp/models'))
-except Exception as e:
-    print(f"Error importing utilities: {e}")
-    pdf_extractor = None
-    model_loader = None
-
-# HTML Templates (inline untuk Vercel)
+# HTML Template
 HOME_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -80,11 +92,20 @@ HOME_TEMPLATE = """
             margin-bottom: 10px;
             font-size: 2.5em;
         }
-        .subtitle {
-            text-align: center;
-            color: #666;
-            margin-bottom: 40px;
+        .status {
+            background: #f0f4f8;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
         }
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        .status-ok { color: #22c55e; }
+        .status-error { color: #ef4444; }
         .upload-area {
             border: 3px dashed #667eea;
             border-radius: 15px;
@@ -93,16 +114,12 @@ HOME_TEMPLATE = """
             background: #f8f9ff;
             transition: all 0.3s;
             cursor: pointer;
+            margin: 30px 0;
         }
         .upload-area:hover {
             background: #eef1ff;
             border-color: #764ba2;
         }
-        .upload-icon {
-            font-size: 4em;
-            margin-bottom: 20px;
-        }
-        input[type="file"] { display: none; }
         .btn {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white;
@@ -112,22 +129,22 @@ HOME_TEMPLATE = """
             font-size: 1.1em;
             cursor: pointer;
             margin-top: 20px;
-            transition: transform 0.2s;
         }
-        .btn:hover { transform: scale(1.05); }
         .btn:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
-        #fileName {
-            margin-top: 20px;
-            color: #667eea;
-            font-weight: bold;
+        .error-box {
+            background: #fee;
+            border: 2px solid #f88;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
         }
         .loading {
             display: none;
             text-align: center;
-            margin-top: 20px;
+            margin: 20px 0;
         }
         .spinner {
             border: 4px solid #f3f3f3;
@@ -142,75 +159,54 @@ HOME_TEMPLATE = """
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
-        .results {
-            display: none;
-            margin-top: 30px;
-        }
-        .sdg-card {
-            background: #f8f9ff;
-            border-left: 5px solid #667eea;
-            padding: 20px;
-            margin: 15px 0;
-            border-radius: 10px;
-        }
-        .sdg-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 10px;
-        }
-        .confidence {
-            background: #667eea;
-            color: white;
-            padding: 5px 15px;
-            border-radius: 20px;
-            font-weight: bold;
-        }
-        .keywords {
-            margin-top: 10px;
-        }
-        .keyword-tag {
-            background: #e0e7ff;
-            color: #667eea;
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-size: 0.9em;
-            margin: 3px;
-            display: inline-block;
-        }
-        .nav-buttons {
-            text-align: center;
-            margin-top: 30px;
-        }
-        .nav-buttons a {
-            color: #667eea;
-            text-decoration: none;
-            margin: 0 15px;
-            font-weight: bold;
-        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🌱 SDGs Extractor</h1>
-        <p class="subtitle">AI-powered Sustainable Development Goals Analysis</p>
         
-        <div class="nav-buttons">
-            <a href="/">🏠 Home</a>
-            <a href="/api/history">📁 History</a>
-            <a href="/api/statistics">📊 Statistics</a>
+        <div class="status">
+            <h3>System Status</h3>
+            <div class="status-item">
+                <span>Model Loaded:</span>
+                <span class="{{ 'status-ok' if model_loaded else 'status-error' }}">
+                    {{ '✅ Ready' if model_loaded else '❌ Not Available' }}
+                </span>
+            </div>
+            <div class="status-item">
+                <span>Database:</span>
+                <span class="{{ 'status-ok' if db_connected else 'status-error' }}">
+                    {{ '✅ Connected' if db_connected else '⚠️ Disabled' }}
+                </span>
+            </div>
         </div>
+        
+        {% if not model_loaded %}
+        <div class="error-box">
+            <h3>⚠️ Model Not Available</h3>
+            <p>Please set the following environment variables in Vercel:</p>
+            <ul>
+                <li><code>MODEL_URL</code> - Direct download URL to your model file</li>
+                <li><code>HF_MODEL_URL</code> - Optional: Hugging Face model URL</li>
+            </ul>
+            <p style="margin-top: 15px;">
+                <strong>Example:</strong><br>
+                <code>MODEL_URL=https://huggingface.co/your-username/your-model/resolve/main/model.joblib</code>
+            </p>
+        </div>
+        {% endif %}
         
         <form id="uploadForm" enctype="multipart/form-data">
             <div class="upload-area" onclick="document.getElementById('fileInput').click()">
-                <div class="upload-icon">📄</div>
+                <div style="font-size: 4em; margin-bottom: 20px;">📄</div>
                 <h3>Click to Upload PDF</h3>
-                <p>Or drag and drop your file here</p>
-                <input type="file" id="fileInput" name="file" accept=".pdf" required>
+                <input type="file" id="fileInput" name="file" accept=".pdf" required style="display: none;">
             </div>
             <div id="fileName"></div>
             <center>
-                <button type="submit" class="btn" id="submitBtn">Analyze Document</button>
+                <button type="submit" class="btn" id="submitBtn" {{ 'disabled' if not model_loaded else '' }}>
+                    Analyze Document
+                </button>
             </center>
         </form>
         
@@ -219,7 +215,7 @@ HOME_TEMPLATE = """
             <p>Analyzing your document...</p>
         </div>
         
-        <div class="results" id="results"></div>
+        <div id="results"></div>
     </div>
 
     <script>
@@ -233,6 +229,8 @@ HOME_TEMPLATE = """
         fileInput.addEventListener('change', function() {
             if (this.files.length > 0) {
                 fileName.textContent = '📎 ' + this.files[0].name;
+                fileName.style.color = '#667eea';
+                fileName.style.fontWeight = 'bold';
             }
         });
 
@@ -262,10 +260,10 @@ HOME_TEMPLATE = """
                 if (data.success) {
                     displayResults(data);
                 } else {
-                    alert('Error: ' + data.error);
+                    alert('Error: ' + (data.error || 'Unknown error'));
                 }
             } catch (error) {
-                alert('Error uploading file: ' + error.message);
+                alert('Error: ' + error.message);
             } finally {
                 loading.style.display = 'none';
                 submitBtn.disabled = false;
@@ -273,33 +271,28 @@ HOME_TEMPLATE = """
         });
 
         function displayResults(data) {
-            const sdgs = data.sdg_analysis;
             let html = '<h2>📊 Analysis Results</h2>';
-            html += `<h3>📄 ${data.document.title}</h3>`;
-            if (data.saved_to_db) {
-                html += '<p style="color: green;">✅ Saved to database</p>';
-            }
-            html += '<div style="margin: 20px 0;">';
+            html += `<h3>${data.document.title}</h3>`;
             
-            sdgs.forEach((sdg, index) => {
+            const sdgs = data.sdg_analysis || [];
+            sdgs.forEach(sdg => {
                 const confidence = (sdg.confidence * 100).toFixed(1);
                 html += `
-                    <div class="sdg-card">
-                        <div class="sdg-header">
-                            <h3>🎯 SDG ${sdg.sdg_number}: ${sdg.sdg_name}</h3>
-                            <span class="confidence">${confidence}%</span>
+                    <div style="background: #f8f9ff; padding: 20px; margin: 15px 0; border-radius: 10px; border-left: 5px solid #667eea;">
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <h3>SDG ${sdg.sdg_number}: ${sdg.sdg_name}</h3>
+                            <span style="background: #667eea; color: white; padding: 5px 15px; border-radius: 20px;">${confidence}%</span>
                         </div>
-                        <p>${sdg.explanation}</p>
-                        <div class="keywords">
+                        <p style="margin: 10px 0;">${sdg.explanation}</p>
+                        <div>
                             <strong>Keywords:</strong><br>
-                            ${sdg.matched_keywords.map(kw => `<span class="keyword-tag">${kw}</span>`).join('')}
+                            ${sdg.matched_keywords.map(kw => `<span style="background: #e0e7ff; color: #667eea; padding: 3px 10px; border-radius: 12px; margin: 3px; display: inline-block;">${kw}</span>`).join('')}
                         </div>
                     </div>
                 `;
             });
             
-            html += '</div>';
-            html += '<center><button class="btn" onclick="location.reload()">Analyze Another Document</button></center>';
+            html += '<center><button class="btn" onclick="location.reload()">Analyze Another</button></center>';
             
             results.innerHTML = html;
             results.style.display = 'block';
@@ -311,12 +304,43 @@ HOME_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HOME_TEMPLATE)
+    """Home page with system status"""
+    try:
+        # Lazy init
+        init_extractors()
+        
+        model_loaded = model_loader is not None and model_loader.sdg_model is not None
+        db_connected = init_supabase() is not None
+        
+        return render_template_string(
+            HOME_TEMPLATE,
+            model_loaded=model_loaded,
+            db_connected=db_connected
+        )
+    except Exception as e:
+        print(f"Error in index: {e}")
+        traceback.print_exc()
+        return f"Error: {str(e)}", 500
 
 @app.route('/api/extract', methods=['POST'])
 def extract():
     """API endpoint for SDG extraction"""
     try:
+        # Initialize components
+        extractor, loader = init_extractors()
+        
+        if not extractor or not loader:
+            return jsonify({
+                'success': False,
+                'error': 'System not initialized. Please check server logs.'
+            }), 500
+        
+        if not loader.sdg_model:
+            return jsonify({
+                'success': False,
+                'error': 'Model not loaded. Please set MODEL_URL environment variable.'
+            }), 503
+        
         if 'file' not in request.files:
             return jsonify({'success': False, 'error': 'No file uploaded'}), 400
         
@@ -331,40 +355,14 @@ def extract():
         
         try:
             # Extract content
-            content = pdf_extractor.extract_content(tmp_path)
+            content = extractor.extract_content(tmp_path)
             analysis_text = f"{content['title']} {content['abstract']} {' '.join(content['keywords'])} {content['full_text']}"
             
             # Run model prediction
-            results = model_loader.predict_sdgs(analysis_text, top_k=3)
-            
-            # Save to Supabase if available
-            saved_to_db = False
-            extraction_id = None
-            
-            if supabase_queries:
-                try:
-                    user_id = session.get('user_id', 'anonymous_user')
-                    
-                    extraction_data = supabase_queries.insert_extraction(
-                        user_id=user_id,
-                        document_name=file.filename,
-                        title=content['title'],
-                        abstract=content['abstract'],
-                        keywords=content['keywords'],
-                        sdg_results=results
-                    )
-                    
-                    extraction_id = extraction_data.get('id')
-                    saved_to_db = True
-                    print(f"✅ Saved to Supabase: {extraction_id}")
-                    
-                except Exception as e:
-                    print(f"⚠️ Supabase save error: {e}")
+            results = loader.predict_sdgs(analysis_text, top_k=3)
             
             return jsonify({
                 'success': True,
-                'extraction_id': extraction_id,
-                'saved_to_db': saved_to_db,
                 'document': {
                     'title': content['title'],
                     'abstract': content['abstract'][:200] + '...',
@@ -378,98 +376,27 @@ def extract():
                 os.remove(tmp_path)
     
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/history')
-def history():
-    """Get user's extraction history"""
-    if not supabase_queries:
-        return jsonify({'error': 'Database not available'}), 503
-    
-    try:
-        user_id = session.get('user_id', 'anonymous_user')
-        limit = request.args.get('limit', 10, type=int)
-        offset = request.args.get('offset', 0, type=int)
-        
-        extractions = supabase_queries.get_user_extractions(user_id, limit, offset)
-        total = supabase_queries.get_total_extractions(user_id)
-        
-        return jsonify({
-            'success': True,
-            'total': total,
-            'extractions': extractions
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/statistics')
-def statistics():
-    """Get SDG statistics"""
-    if not supabase_queries:
-        return jsonify({'error': 'Database not available'}), 503
-    
-    try:
-        sdg_stats = supabase_queries.get_sdg_statistics()
-        top_sdgs = supabase_queries.get_top_sdgs(limit=5)
-        
-        return jsonify({
-            'success': True,
-            'all_sdgs': sdg_stats,
-            'top_sdgs': top_sdgs
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/extraction/<extraction_id>')
-def get_extraction(extraction_id):
-    """Get specific extraction by ID"""
-    if not supabase_queries:
-        return jsonify({'error': 'Database not available'}), 503
-    
-    try:
-        extraction = supabase_queries.get_extraction_by_id(extraction_id)
-        
-        if extraction:
-            return jsonify({
-                'success': True,
-                'extraction': extraction
-            })
-        else:
-            return jsonify({'success': False, 'error': 'Not found'}), 404
-            
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
-
-@app.route('/api/search')
-def search():
-    """Search extractions"""
-    if not supabase_queries:
-        return jsonify({'error': 'Database not available'}), 503
-    
-    try:
-        query = request.args.get('q', '')
-        user_id = session.get('user_id', 'anonymous_user')
-        limit = request.args.get('limit', 10, type=int)
-        
-        results = supabase_queries.search_extractions(query, user_id, limit)
-        
-        return jsonify({
-            'success': True,
-            'query': query,
-            'results': results
-        })
-    except Exception as e:
+        print(f"Error in extract: {e}")
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/health')
 def health():
     """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'model_loaded': model_loader.sdg_model is not None if model_loader else False,
-        'database_connected': supabase_client is not None,
-        'timestamp': datetime.utcnow().isoformat()
-    })
+    try:
+        extractor, loader = init_extractors()
+        
+        return jsonify({
+            'status': 'healthy',
+            'model_loaded': loader is not None and loader.sdg_model is not None,
+            'database_connected': init_supabase() is not None,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 500
 
 # Vercel handler
 def handler(request):
