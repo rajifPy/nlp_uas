@@ -1,13 +1,36 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session
 import os
 import sys
 import tempfile
 from pathlib import Path
+from datetime import datetime
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 app = Flask(__name__)
+app.secret_key = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# Initialize Supabase
+supabase_client = None
+supabase_queries = None
+
+try:
+    from supabase import create_client, Client
+    supabase_url = os.getenv('SUPABASE_URL')
+    supabase_key = os.getenv('SUPABASE_KEY')
+    
+    if supabase_url and supabase_key:
+        supabase_client: Client = create_client(supabase_url, supabase_key)
+        
+        # Import query helper
+        from utils.supabase_queries import SupabaseQueries
+        supabase_queries = SupabaseQueries(supabase_client)
+        print("✅ Supabase connected successfully")
+    else:
+        print("⚠️ Supabase credentials not found. Database features disabled.")
+except Exception as e:
+    print(f"⚠️ Supabase initialization error: {e}")
 
 # Auto-download model jika belum ada
 print("🔍 Checking for model...")
@@ -155,12 +178,28 @@ HOME_TEMPLATE = """
             margin: 3px;
             display: inline-block;
         }
+        .nav-buttons {
+            text-align: center;
+            margin-top: 30px;
+        }
+        .nav-buttons a {
+            color: #667eea;
+            text-decoration: none;
+            margin: 0 15px;
+            font-weight: bold;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🌱 SDGs Extractor</h1>
         <p class="subtitle">AI-powered Sustainable Development Goals Analysis</p>
+        
+        <div class="nav-buttons">
+            <a href="/">🏠 Home</a>
+            <a href="/api/history">📁 History</a>
+            <a href="/api/statistics">📊 Statistics</a>
+        </div>
         
         <form id="uploadForm" enctype="multipart/form-data">
             <div class="upload-area" onclick="document.getElementById('fileInput').click()">
@@ -237,6 +276,9 @@ HOME_TEMPLATE = """
             const sdgs = data.sdg_analysis;
             let html = '<h2>📊 Analysis Results</h2>';
             html += `<h3>📄 ${data.document.title}</h3>`;
+            if (data.saved_to_db) {
+                html += '<p style="color: green;">✅ Saved to database</p>';
+            }
             html += '<div style="margin: 20px 0;">';
             
             sdgs.forEach((sdg, index) => {
@@ -295,8 +337,34 @@ def extract():
             # Run model prediction
             results = model_loader.predict_sdgs(analysis_text, top_k=3)
             
+            # Save to Supabase if available
+            saved_to_db = False
+            extraction_id = None
+            
+            if supabase_queries:
+                try:
+                    user_id = session.get('user_id', 'anonymous_user')
+                    
+                    extraction_data = supabase_queries.insert_extraction(
+                        user_id=user_id,
+                        document_name=file.filename,
+                        title=content['title'],
+                        abstract=content['abstract'],
+                        keywords=content['keywords'],
+                        sdg_results=results
+                    )
+                    
+                    extraction_id = extraction_data.get('id')
+                    saved_to_db = True
+                    print(f"✅ Saved to Supabase: {extraction_id}")
+                    
+                except Exception as e:
+                    print(f"⚠️ Supabase save error: {e}")
+            
             return jsonify({
                 'success': True,
+                'extraction_id': extraction_id,
+                'saved_to_db': saved_to_db,
                 'document': {
                     'title': content['title'],
                     'abstract': content['abstract'][:200] + '...',
@@ -312,12 +380,95 @@ def extract():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
 
+@app.route('/api/history')
+def history():
+    """Get user's extraction history"""
+    if not supabase_queries:
+        return jsonify({'error': 'Database not available'}), 503
+    
+    try:
+        user_id = session.get('user_id', 'anonymous_user')
+        limit = request.args.get('limit', 10, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        extractions = supabase_queries.get_user_extractions(user_id, limit, offset)
+        total = supabase_queries.get_total_extractions(user_id)
+        
+        return jsonify({
+            'success': True,
+            'total': total,
+            'extractions': extractions
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/statistics')
+def statistics():
+    """Get SDG statistics"""
+    if not supabase_queries:
+        return jsonify({'error': 'Database not available'}), 503
+    
+    try:
+        sdg_stats = supabase_queries.get_sdg_statistics()
+        top_sdgs = supabase_queries.get_top_sdgs(limit=5)
+        
+        return jsonify({
+            'success': True,
+            'all_sdgs': sdg_stats,
+            'top_sdgs': top_sdgs
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/extraction/<extraction_id>')
+def get_extraction(extraction_id):
+    """Get specific extraction by ID"""
+    if not supabase_queries:
+        return jsonify({'error': 'Database not available'}), 503
+    
+    try:
+        extraction = supabase_queries.get_extraction_by_id(extraction_id)
+        
+        if extraction:
+            return jsonify({
+                'success': True,
+                'extraction': extraction
+            })
+        else:
+            return jsonify({'success': False, 'error': 'Not found'}), 404
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/search')
+def search():
+    """Search extractions"""
+    if not supabase_queries:
+        return jsonify({'error': 'Database not available'}), 503
+    
+    try:
+        query = request.args.get('q', '')
+        user_id = session.get('user_id', 'anonymous_user')
+        limit = request.args.get('limit', 10, type=int)
+        
+        results = supabase_queries.search_extractions(query, user_id, limit)
+        
+        return jsonify({
+            'success': True,
+            'query': query,
+            'results': results
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/health')
 def health():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'model_loaded': model_loader.sdg_model is not None if model_loader else False
+        'model_loaded': model_loader.sdg_model is not None if model_loader else False,
+        'database_connected': supabase_client is not None,
+        'timestamp': datetime.utcnow().isoformat()
     })
 
 # Vercel handler
