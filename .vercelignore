@@ -1,0 +1,51 @@
+# Ignore files yang tidak dibutuhkan di Vercel
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+
+# Local development
+.env
+.env.local
+venv/
+env/
+ENV/
+
+# Model files (akan didownload di runtime)
+models/
+*.joblib
+*.pkl
+*.h5
+*.pth
+
+# Templates dan static files (sudah inline di api/index.py)
+templates/
+static/
+
+# Development files
+app.py
+download_models.py
+test_*.py
+*.md
+README.md
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+docs/
+examples/
