@@ -23,37 +23,25 @@ wheels/
 .installed.cfg
 *.egg
 
-# Model files (>50MB, akan di-download at runtime)
+# Environment
+.env
+.env.local
+
+# Model files
 *.joblib
 *.pkl
 *.h5
 *.pth
-*.onnx
 models/
-/models/*
-
-# Environment variables
-.env
-.env.local
 
 # IDEs
 .vscode/
 .idea/
 *.swp
-*.swo
-*~
 
 # OS
 .DS_Store
 Thumbs.db
-
-# Logs
-*.log
-
-# Temporary files
-*.tmp
-tmp/
-temp/
 
 # Vercel
 .vercel
